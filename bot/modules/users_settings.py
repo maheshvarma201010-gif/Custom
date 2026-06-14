@@ -1,3 +1,5 @@
+# bot/modules/users_settings.py
+
 from aiofiles.os import remove, path as aiopath, makedirs
 from asyncio import sleep
 from functools import partial
@@ -299,22 +301,22 @@ Stop Duplicate is <b>{sd_msg}</b>"""
                 "Enable FILES LINKS", f"userset {user_id} tog FILES_LINKS t"
             )
 
-        # ========== NEW MERGE TASKS TOGGLE ==========
-        if (
-            user_dict.get("MERGE_TASKS", False)
-            or "MERGE_TASKS" not in user_dict
-            and getattr(Config, 'MERGE_TASKS', False)
-        ):
-            merge_status = "Enabled"
+        # ========== AUTO MERGE TOGGLE ==========
+        auto_merge_enabled = user_dict.get("AUTO_MERGE", False)
+        if not auto_merge_enabled and "AUTO_MERGE" not in user_dict:
+            auto_merge_enabled = getattr(Config, 'AUTO_MERGE', False)
+        
+        if auto_merge_enabled:
+            auto_merge_status = "Enabled"
             buttons.data_button(
-                "Disable Merge Tasks", f"userset {user_id} tog MERGE_TASKS f"
+                "Disable Auto Merge", f"userset {user_id} tog AUTO_MERGE f"
             )
         else:
-            merge_status = "Disabled"
+            auto_merge_status = "Disabled"
             buttons.data_button(
-                "Enable Merge Tasks", f"userset {user_id} tog MERGE_TASKS t"
+                "Enable Auto Merge", f"userset {user_id} tog AUTO_MERGE t"
             )
-        # ========== END OF MERGE TASKS TOGGLE ==========
+        # ========== END OF AUTO MERGE TOGGLE ==========
 
         buttons.data_button(
             "Excluded Extensions", f"userset {user_id} menu EXCLUDED_EXTENSIONS"
@@ -381,7 +383,7 @@ Stop Duplicate is <b>{sd_msg}</b>"""
 Default Package is <b>{du}</b>
 Use <b>{tr}</b> token/config
 Files Links is <b>{fl}</b>
-Merge Tasks is <b>{merge_status}</b>
+Auto Merge is <b>{auto_merge_status}</b>
 Upload Paths is <code>{upload_paths}</code>
 
 Name substitution is <code>{ns_msg}</code>
@@ -443,7 +445,7 @@ async def add_one(_, message, option):
     if value.startswith("{") and value.endswith("}"):
         try:
             value = eval(value)
-            if user_dict[option]:
+            if user_dict.get(option):
                 user_dict[option].update(value)
             else:
                 update_user_ldata(user_id, option, value)
@@ -464,7 +466,7 @@ async def remove_one(_, message, option):
     user_dict = user_data.get(user_id, {})
     names = message.text.split("/")
     for name in names:
-        if name in user_dict[option]:
+        if name in user_dict.get(option, {}):
             del user_dict[option][name]
     await delete_message(message)
     await database.update_user_data(user_id)
@@ -749,7 +751,8 @@ async def edit_user_settings(client, query):
                 fpath = token_pickle
             if await aiopath.exists(fpath):
                 await remove(fpath)
-            del user_dict[data[3]]
+            if data[3] in user_dict:
+                del user_dict[data[3]]
             await database.update_user_doc(user_id, data[3])
         else:
             update_user_ldata(user_id, data[3], "")
