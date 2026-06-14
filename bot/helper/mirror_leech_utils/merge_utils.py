@@ -26,6 +26,7 @@ class MergedTask:
         self.status_message = None
         self.merge_path = None
         self.download_paths = []
+        self.tag = getattr(self, 'tag', '')
 
     async def start_merge(self):
         """Start the merged task process"""
@@ -65,6 +66,10 @@ class MergedTask:
                 parent_merge_task=self.merge_id
             )
             
+            # Set user and tag for sub-task
+            sub_task.user = self.message.from_user or self.message.sender_chat
+            sub_task.tag = self.tag
+            
             self.sub_tasks.append({
                 'task': sub_task,
                 'link': link,
@@ -89,6 +94,7 @@ class MergedTask:
             
             for sub_task in self.sub_tasks:
                 task = sub_task['task']
+                # Check using download_path or path attribute
                 if hasattr(task, 'is_completed') and task.is_completed:
                     sub_task['status'] = 'completed'
                     completed += 1
@@ -96,6 +102,8 @@ class MergedTask:
                         self.download_paths.append(task.download_path)
                     elif hasattr(task, 'path') and task.path:
                         self.download_paths.append(task.path)
+                    elif hasattr(task, 'dir') and task.dir:
+                        self.download_paths.append(task.dir)
                 elif hasattr(task, 'is_failed') and task.is_failed:
                     sub_task['status'] = 'failed'
                     failed += 1
@@ -131,6 +139,8 @@ class MergedTask:
                     self.download_paths.append(task.download_path)
                 elif hasattr(task, 'path') and task.path:
                     self.download_paths.append(task.path)
+                elif hasattr(task, 'dir') and task.dir:
+                    self.download_paths.append(task.dir)
 
         if not self.download_paths:
             await send_message(self.message, "❌ No files found to merge!")
@@ -139,7 +149,7 @@ class MergedTask:
         merged_file_path = self.merge_path
         
         for path in self.download_paths:
-            if ospath.exists(path):
+            if path and ospath.exists(path):
                 if ospath.isdir(path):
                     for item in os.listdir(path):
                         src = ospath.join(path, item)
