@@ -1,3 +1,5 @@
+# bot/helper/mirror_leech_utils/telegram_uploader.py
+
 from PIL import Image
 from aioshutil import rmtree
 from asyncio import sleep
@@ -25,7 +27,7 @@ from tenacity import (
     RetryError,
 )
 
-from ... import intervals
+from ... import intervals, user_data, Config
 from ...core.config_manager import Config
 from ...core.telegram_manager import TgClient
 from ..ext_utils.bot_utils import sync_to_async
@@ -38,6 +40,7 @@ from ..ext_utils.media_utils import (
     get_audio_thumbnail,
     get_multiple_frames_thumbnail,
 )
+from .merge_utils import VideoMerger
 
 LOGGER = getLogger(__name__)
 
@@ -63,6 +66,11 @@ class TelegramUploader:
         self._user_session = self._listener.user_transmission
         self._error = ""
         self._base_msg = None
+        self._merged_file_path = None
+        self._merged_files_to_delete = []
+        self._force_merge = getattr(listener, 'force_merge', False)
+        self._merge_custom_name = getattr(listener, 'merge_custom_name', "")
+        self._merge_performed = False
 
     async def _upload_progress(self, current, _):
         if self._listener.is_cancelled:
@@ -87,6 +95,77 @@ class TelegramUploader:
         )
         if self._thumb != "none" and not await aiopath.exists(self._thumb):
             self._thumb = None
+
+    async def _should_auto_merge(self) -> bool:
+        """Check if auto merge should be performed"""
+        # Check if force merge is enabled via -m flag
+        if self._force_merge:
+            return True
+        
+        # Check user setting
+        auto_merge = self._listener.user_dict.get("AUTO_MERGE", False)
+        if not auto_merge:
+            auto_merge = getattr(Config, 'AUTO_MERGE', False)
+        
+        # Check if there are multiple video files
+        if auto_merge and ospath.isdir(self._path):
+            video_count = len(await VideoMerger.get_video_files(self._path))
+            if video_count >= 2:
+                return True
+        
+        return False
+
+    async def _handle_merge_upload(self):
+        """Handle upload with video merging"""
+        # Send status message
+        await self._listener.on_upload_error("🔄 **Auto Merge Enabled**\n\nChecking for video files to merge...")
+        
+        # Perform merge
+        success, result, files_to_delete = await VideoMerger.perform_merge(
+            user_id=self._listener.user_id,
+            directory=self._path,
+            custom_name=self._merge_custom_name,
+            force_merge=self._force_merge,
+            listener=self._listener
+        )
+        
+        if success and result:
+            self._merged_file_path = result
+            self._merged_files_to_delete = files_to_delete
+            self._merge_performed = True
+            
+            # Update path to merged file
+            self._path = result
+            
+            await self._listener.on_upload_error(
+                f"✅ **Merge Complete!**\n\n"
+                f"📁 Merged {len(files_to_delete)} files into:\n"
+                f"`{ospath.basename(result)}`\n\n"
+                f"📤 Uploading to Telegram..."
+            )
+            
+            # Now upload the merged file
+            return True
+        elif self._force_merge and not success:
+            await self._listener.on_upload_error(f"❌ Merge failed: {result}")
+            return False
+        else:
+            # Fall back to normal upload
+            return True
+    
+    async def _cleanup_merged_files(self):
+        """Delete original files after successful merge and upload"""
+        if not self._merge_performed:
+            return
+        
+        for file_path in self._merged_files_to_delete:
+            try:
+                if ospath.isfile(file_path):
+                    await remove(file_path)
+                elif ospath.isdir(file_path):
+                    await rmtree(file_path, ignore_errors=True)
+            except Exception as e:
+                LOGGER.error(f"Failed to delete merged file {file_path}: {e}")
 
     async def _msg_to_reply(self):
         if self._listener.up_dest:
@@ -219,9 +298,17 @@ class TelegramUploader:
 
     async def upload(self):
         await self._user_settings()
+        
+        # Check if merge should be performed
+        if await self._should_auto_merge():
+            should_continue = await self._handle_merge_upload()
+            if not should_continue:
+                return
+        
         res = await self._msg_to_reply()
         if not res:
             return
+        
         walk_result = await sync_to_async(lambda: list(walk(self._path)))
         for dirpath, _, files in natsorted(walk_result):
             if dirpath.strip().endswith("/yt-dlp-thumb"):
@@ -233,6 +320,11 @@ class TelegramUploader:
             for file_ in natsorted(files):
                 self._error = ""
                 self._up_path = f_path = ospath.join(dirpath, file_)
+                
+                # Skip original files if they were merged
+                if self._merge_performed and f_path in self._merged_files_to_delete:
+                    continue
+                    
                 if not await aiopath.exists(self._up_path):
                     if intervals["stopAll"]:
                         return
@@ -319,6 +411,7 @@ class TelegramUploader:
                     self._up_path
                 ):
                     await remove(self._up_path)
+        
         for key, value in list(self._media_dict.items()):
             for subkey, msgs in list(value.items()):
                 if len(msgs) > 1:
@@ -328,9 +421,14 @@ class TelegramUploader:
                         LOGGER.info(
                             f"While sending media group at the end of task. Error: {e}"
                         )
+        
         if self._base_msg:
             await delete_message(self._base_msg)
             self._base_msg = None
+        
+        # Clean up merged original files after successful upload
+        await self._cleanup_merged_files()
+        
         if self._listener.is_cancelled:
             return
         if self._total_files == 0:
@@ -343,11 +441,33 @@ class TelegramUploader:
                 f"Files Corrupted or unable to upload. {self._error or 'Check logs!'}"
             )
             return
+        
+        # Send final merge success message if merge was performed
+        if self._merge_performed:
+            merge_msg = (
+                f"✅ **Auto Merge Completed Successfully!**\n\n"
+                f"📁 **Merged File:** `{ospath.basename(self._merged_file_path)}`\n"
+                f"💾 **Size:** {self._get_readable_file_size(ospath.getsize(self._merged_file_path))}\n"
+                f"🎬 **Original videos merged and cleaned up.**"
+            )
+            await self._listener.on_upload_error(merge_msg)
+        
         LOGGER.info(f"Leech Completed: {self._listener.name}")
         await self._listener.on_upload_complete(
             None, self._msgs_dict, self._total_files, self._corrupted
         )
         return
+    
+    def _get_readable_file_size(self, size_bytes):
+        """Convert bytes to readable format"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.2f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.2f} MB"
+        else:
+            return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
