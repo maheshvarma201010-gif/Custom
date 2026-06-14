@@ -299,6 +299,23 @@ Stop Duplicate is <b>{sd_msg}</b>"""
                 "Enable FILES LINKS", f"userset {user_id} tog FILES_LINKS t"
             )
 
+        # ========== NEW MERGE TASKS TOGGLE ==========
+        if (
+            user_dict.get("MERGE_TASKS", False)
+            or "MERGE_TASKS" not in user_dict
+            and getattr(Config, 'MERGE_TASKS', False)
+        ):
+            merge_status = "Enabled"
+            buttons.data_button(
+                "Disable Merge Tasks", f"userset {user_id} tog MERGE_TASKS f"
+            )
+        else:
+            merge_status = "Disabled"
+            buttons.data_button(
+                "Enable Merge Tasks", f"userset {user_id} tog MERGE_TASKS t"
+            )
+        # ========== END OF MERGE TASKS TOGGLE ==========
+
         buttons.data_button(
             "Excluded Extensions", f"userset {user_id} menu EXCLUDED_EXTENSIONS"
         )
@@ -364,6 +381,7 @@ Stop Duplicate is <b>{sd_msg}</b>"""
 Default Package is <b>{du}</b>
 Use <b>{tr}</b> token/config
 Files Links is <b>{fl}</b>
+Merge Tasks is <b>{merge_status}</b>
 Upload Paths is <code>{upload_paths}</code>
 
 Name substitution is <code>{ns_msg}</code>
