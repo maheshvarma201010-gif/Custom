@@ -1,3 +1,5 @@
+# bot/helper/ext_utils/bot_utils.py
+
 from html import escape
 from psutil import virtual_memory, cpu_percent, disk_usage
 from time import time
@@ -26,6 +28,7 @@ class MirrorStatus:
     STATUS_SAMVID = "SamVid"
     STATUS_CONVERT = "Convert"
     STATUS_FFMPEG = "FFmpeg"
+    STATUS_MERGE = "Merge"  # Added for Auto Merge feature
 
 
 STATUSES = {
@@ -44,6 +47,7 @@ STATUSES = {
     "FF": MirrorStatus.STATUS_FFMPEG,
     "PA": MirrorStatus.STATUS_PAUSED,
     "CK": MirrorStatus.STATUS_CHECK,
+    "MG": MirrorStatus.STATUS_MERGE,  # Added for merge status
 }
 
 
@@ -92,7 +96,7 @@ async def get_all_tasks(req_status: str, user_id):
 
 
 def get_readable_file_size(size_in_bytes):
-    if not size_in_bytes:
+    if not size_in_bytes or size_in_bytes == 0:
         return "0B"
 
     index = 0
@@ -104,6 +108,8 @@ def get_readable_file_size(size_in_bytes):
 
 
 def get_readable_time(seconds: int):
+    if seconds <= 0:
+        return "0s"
     periods = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
     result = ""
     for period_name, period_seconds in periods:
@@ -148,13 +154,87 @@ def speed_string_to_bytes(size_text: str):
     return size
 
 
+def get_size_bytes(size_text: str):
+    """Convert size string to bytes (e.g., '1GB' -> 1073741824)"""
+    if not size_text:
+        return 0
+    size_text = size_text.strip().upper()
+    if size_text.endswith("KB"):
+        return float(size_text[:-2]) * 1024
+    elif size_text.endswith("MB"):
+        return float(size_text[:-2]) * 1048576
+    elif size_text.endswith("GB"):
+        return float(size_text[:-2]) * 1073741824
+    elif size_text.endswith("TB"):
+        return float(size_text[:-2]) * 1099511627776
+    elif size_text.endswith("B"):
+        return float(size_text[:-1])
+    else:
+        return float(size_text)
+
+
 def get_progress_bar_string(pct):
+    if not pct:
+        pct = "0%"
     pct = float(pct.strip("%"))
     p = min(max(pct, 0), 100)
     cFull = int(p // 8)
     p_str = "■" * cFull
     p_str += "□" * (12 - cFull)
     return f"[{p_str}]"
+
+
+def natural_sort_key(filename: str):
+    """Natural sorting for filenames (Episode 1, Episode 2, Episode 10)"""
+    import re
+    parts = re.split(r'(\d+)', filename)
+    return [int(part) if part.isdigit() else part.lower() for part in parts]
+
+
+def extract_links_and_merge_flag(text: str) -> tuple:
+    """
+    Extract all links and check for merge flag
+    Returns: (links_list, should_merge, custom_name, cleaned_text)
+    """
+    import re
+    
+    # Split by spaces but respect quotes for merge name
+    parts = text.split()
+    
+    links = []
+    should_merge = False
+    custom_name = ""
+    skip_next = False
+    cleaned_parts = []
+    
+    for i, part in enumerate(parts):
+        if skip_next:
+            skip_next = False
+            cleaned_parts.append(part)
+            continue
+            
+        if part == '-m':
+            should_merge = True
+            # Check if next part is a quoted name
+            if i + 1 < len(parts):
+                next_part = parts[i + 1]
+                if next_part.startswith('"') and next_part.endswith('"'):
+                    custom_name = next_part[1:-1]
+                    skip_next = True
+                elif next_part.startswith("'") and next_part.endswith("'"):
+                    custom_name = next_part[1:-1]
+                    skip_next = True
+                elif not next_part.startswith('-'):
+                    custom_name = next_part
+                    skip_next = True
+        else:
+            cleaned_parts.append(part)
+            # Check if it's a URL
+            if part.startswith(('http://', 'https://', 'magnet:', 'torrent:', 'rc:', 'gd:')):
+                links.append(part)
+    
+    cleaned_text = " ".join(cleaned_parts)
+    return links, should_merge, custom_name, cleaned_text
 
 
 async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=1):
@@ -184,17 +264,31 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
             tstatus = await task.status()
         else:
             tstatus = task.status()
+        
+        # Get task name safely
+        try:
+            task_name = task.name()
+        except:
+            task_name = "Unknown Task"
+        
         if task.listener.is_super_chat:
             msg += f"<b>{index + start_position}.<a href='{task.listener.message.link}'>{tstatus}</a>: </b>"
         else:
             msg += f"<b>{index + start_position}.{tstatus}: </b>"
-        msg += f"<code>{escape(f'{task.name()}')}</code>"
+        msg += f"<code>{escape(task_name)}</code>"
+        
         if task.listener.subname:
             msg += f"\n<i>{task.listener.subname}</i>"
-        if (
-            tstatus not in [MirrorStatus.STATUS_SEED, MirrorStatus.STATUS_QUEUEUP]
-            and task.listener.progress
-        ):
+        
+        # Show merge specific info
+        if tstatus == MirrorStatus.STATUS_MERGE:
+            msg += f"\n<b>Status:</b> Merging videos in order..."
+            if hasattr(task, 'merge_progress'):
+                msg += f"\n<b>Progress:</b> {task.merge_progress}"
+            if hasattr(task, 'videos_merged'):
+                msg += f"\n<b>Videos Merged:</b> {task.videos_merged}"
+        
+        elif tstatus not in [MirrorStatus.STATUS_SEED, MirrorStatus.STATUS_QUEUEUP] and task.listener.progress:
             progress = task.progress()
             msg += f"\n{get_progress_bar_string(progress)} {progress}"
             if task.listener.subname:
@@ -227,6 +321,7 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
             msg += f" | <b>Time: </b>{task.seeding_time()}"
         else:
             msg += f"\n<b>Size: </b>{task.size()}"
+        
         msg += f"\n<b>Gid: </b><code>{task.gid()}</code>\n\n"
         task_gids.append((index + start_position, task.gid()))
 
@@ -235,9 +330,11 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
             return None, None
         else:
             msg = f"No Active {status} Tasks!\n\n"
+    
     buttons = ButtonMaker()
     if not is_user:
         buttons.data_button("📜", f"status {sid} ov", position="header")
+    
     if len(tasks) > STATUS_LIMIT:
         msg += f"<b>Page:</b> {page_no}/{pages} | <b>Tasks:</b> {tasks_no} | <b>Step:</b> {page_step}\n"
         buttons.data_button("<<", f"status {sid} pre", position="header")
@@ -245,12 +342,15 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         if tasks_no > 30:
             for i in [1, 2, 4, 6, 8, 10, 15]:
                 buttons.data_button(i, f"status {sid} ps {i}", position="footer")
+    
     if status != "All" or tasks_no > 20:
         for label, status_value in list(STATUSES.items()):
             if status_value != status:
                 buttons.data_button(label, f"status {sid} st {status_value}")
+    
     buttons.data_button("♻️", f"status {sid} ref", position="header")
     button = buttons.build_menu(8)
+    
     if task_gids:
         cancel_buttons = [
             InlineKeyboardButton(
@@ -261,6 +361,33 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         ]
         for i in range(0, len(cancel_buttons), 4):
             button.inline_keyboard.append(cancel_buttons[i : i + 4])
-    msg += f"<b>CPU:</b> {cpu_percent()}% | <b>FREE:</b> {get_readable_file_size(disk_usage(DOWNLOAD_DIR).free)}"
-    msg += f"\n<b>RAM:</b> {virtual_memory().percent}% | <b>UPTIME:</b> {get_readable_time(time() - bot_start_time)}"
+    
+    # Get system stats
+    try:
+        cpu_usage = cpu_percent()
+        ram_usage = virtual_memory().percent
+        disk_free = disk_usage(DOWNLOAD_DIR).free
+        uptime = get_readable_time(time() - bot_start_time)
+        
+        msg += f"<b>CPU:</b> {cpu_usage}% | <b>FREE:</b> {get_readable_file_size(disk_free)}"
+        msg += f"\n<b>RAM:</b> {ram_usage}% | <b>UPTIME:</b> {uptime}"
+    except:
+        msg += f"\n<b>UPTIME:</b> {get_readable_time(time() - bot_start_time)}"
+    
     return msg, button
+
+
+def update_user_ldata(user_id, key, value):
+    """Update user data dictionary"""
+    from ... import user_data
+    if user_id not in user_data:
+        user_data[user_id] = {}
+    user_data[user_id][key] = value
+
+
+def new_task(func):
+    """Decorator to run async functions as new tasks"""
+    from ... import bot_loop
+    def wrapper(*args, **kwargs):
+        return bot_loop.create_task(func(*args, **kwargs))
+    return wrapper
