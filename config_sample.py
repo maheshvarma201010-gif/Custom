@@ -29,6 +29,9 @@ NAME_SUBSTITUTE = r""
 FFMPEG_CMDS = {"merge": ["-f concat -safe 0 -i mltb.txt -c copy mltb.mp4 -del"]}
 UPLOAD_PATHS = {}
 FILES_LINKS = False
+# ========== ADD THIS NEW LINE ==========
+MERGE_TASKS = False  # Enable merge feature for multiple links in one command
+# ========================================
 # GDrive Tools
 GDRIVE_ID = ""
 IS_TEAM_DRIVE = False
