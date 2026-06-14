@@ -6,7 +6,7 @@ from base64 import b64encode
 from os.path import basename as ospath_basename
 from re import match as re_match
 
-from .. import LOGGER, bot_loop, task_dict_lock, DOWNLOAD_DIR
+from .. import LOGGER, bot_loop, task_dict_lock, DOWNLOAD_DIR, user_data
 from ..helper.ext_utils.bot_utils import (
     get_content_type,
     sync_to_async,
@@ -53,6 +53,7 @@ from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
 from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
+from ..helper.mirror_leech_utils.merge_utils import MergedTask  # New import
 
 
 class Mirror(TaskListener):
@@ -68,6 +69,7 @@ class Mirror(TaskListener):
         bulk=None,
         multi_tag=None,
         options="",
+        parent_merge_task=None,  # New parameter for merge
     ):
         if same_dir is None:
             same_dir = {}
@@ -79,6 +81,7 @@ class Mirror(TaskListener):
         self.options = options
         self.same_dir = same_dir
         self.bulk = bulk
+        self.parent_merge_task = parent_merge_task  # Track if this is part of a merge
         super().__init__()
         self.is_qbit = is_qbit
         self.is_leech = is_leech
@@ -157,6 +160,52 @@ class Mirror(TaskListener):
         self.is_alldebrid = args["-ad"]
         self.is_torbox = args["-tb"]
         self.ffmpeg_cmds = args["-ff"]
+
+        # NEW: Check if merge is enabled for this user
+        user_id = self.message.from_user.id if self.message.from_user else self.message.sender_chat.id
+        user_dict = user_data.get(user_id, {})
+        merge_enabled = user_dict.get("MERGE_TASKS", False)
+        
+        # Extract all links from the command
+        all_links = []
+        remaining_args = input_list[1:]
+        
+        # Parse all links from arguments
+        for arg in remaining_args:
+            if is_url(arg) or is_magnet(arg) or is_gdrive_link(arg) or is_rclone_path(arg):
+                all_links.append(arg)
+            elif arg.startswith("http") or arg.startswith("magnet:"):
+                all_links.append(arg)
+        
+        # If no links found in args, check if link field has multiple links
+        if not all_links and self.link:
+            # Check if link contains multiple URLs separated by space or newline
+            if " " in self.link or "\n" in self.link:
+                all_links = self.link.split()
+            else:
+                all_links = [self.link]
+        
+        # NEW: Handle merge functionality
+        if merge_enabled and len(all_links) > 1 and not self.parent_merge_task:
+            # Create a merged task instead of individual ones
+            LOGGER.info(f"Creating merged task for {len(all_links)} links for user {user_id}")
+            
+            # Create merged task
+            merged_task = MergedTask(
+                client=self.client,
+                message=self.message,
+                links=all_links,
+                is_leech=self.is_leech,
+                is_qbit=self.is_qbit,
+                is_jd=self.is_jd,
+                is_nzb=self.is_nzb,
+                options=self.options,
+                user_dict=user_dict,
+                args=args
+            )
+            
+            await merged_task.start_merge()
+            return
 
         headers = args["-h"]
         if headers:
@@ -545,4 +594,4 @@ async def jd_leech(client, message):
 async def nzb_leech(client, message):
     bot_loop.create_task(
         Mirror(client, message, is_leech=True, is_nzb=True).new_event()
-    )
+)
