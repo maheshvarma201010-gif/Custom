@@ -1,4 +1,5 @@
 import asyncio
+import os
 from os import path as ospath
 from shutil import rmtree
 from aiofiles.os import remove as aioremove
@@ -6,6 +7,7 @@ from ..telegram_helper.message_utils import send_message, edit_message
 from ..ext_utils.bot_utils import new_task
 from ..ext_utils.db_handler import database
 from ... import LOGGER, DOWNLOAD_DIR, user_data
+
 
 class MergedTask:
     def __init__(self, client, message, links, is_leech, is_qbit, is_jd, is_nzb, options, user_dict, args):
@@ -23,30 +25,32 @@ class MergedTask:
         self.merge_id = f"merge_{message.id}_{message.from_user.id if message.from_user else message.sender_chat.id}"
         self.status_message = None
         self.merge_path = None
-        
+        self.download_paths = []  # Track download paths
+
     async def start_merge(self):
         """Start the merged task process"""
         # Create status message
         self.status_message = await send_message(
-            self.message, 
+            self.message,
             f"🔄 **Merge Task Started**\n"
             f"📥 Total links: {len(self.links)}\n"
             f"⚙️ Status: Initializing downloads..."
         )
-        
+
         # Create directory for merged downloads
-        from ... import DOWNLOAD_DIR
         self.merge_path = f"{DOWNLOAD_DIR}{self.merge_id}/"
-        
+        os.makedirs(self.merge_path, exist_ok=True)
+
+        # Import Mirror here to avoid circular import
+        from ...modules.mirror_leech import Mirror
+
         # Create sub-tasks for each link
         for idx, link in enumerate(self.links, 1):
-            from .mirror_leech_utils import Mirror  # Import here to avoid circular import
-            
             # Create modified args for sub-task
             sub_args = self.args.copy()
             sub_args["link"] = link
             sub_args["-i"] = 0  # Reset multi counter
-            
+
             # Create sub-task message
             sub_message = await send_message(
                 self.message,
@@ -56,7 +60,7 @@ class MergedTask:
                 sub_message.from_user = self.message.from_user
             else:
                 sub_message.sender_chat = self.message.sender_chat
-            
+
             # Create sub-task
             sub_task = Mirror(
                 client=self.client,
@@ -68,41 +72,56 @@ class MergedTask:
                 parent_merge_task=self.merge_id
             )
             
+            # Store the link and task
             self.sub_tasks.append({
                 'task': sub_task,
                 'link': link,
                 'status': 'pending',
-                'path': None
+                'index': idx
             })
-        
+
         # Start all sub-tasks
         for sub_task in self.sub_tasks:
             await sub_task['task'].new_event()
             sub_task['status'] = 'downloading'
-        
+
         # Monitor completion
         await self.monitor_merge()
-    
+
     async def monitor_merge(self):
         """Monitor all sub-tasks and merge when complete"""
         while True:
             await asyncio.sleep(3)
+
+            # Check status of each sub-task
+            completed = 0
+            failed = 0
+            downloading = 0
             
-            # Update status message
-            completed = sum(1 for t in self.sub_tasks if t['status'] == 'completed')
-            failed = sum(1 for t in self.sub_tasks if t['status'] == 'failed')
-            downloading = sum(1 for t in self.sub_tasks if t['status'] == 'downloading')
-            
+            for sub_task in self.sub_tasks:
+                task = sub_task['task']
+                # Check if task has completed (you may need to adjust this based on your TaskListener)
+                if hasattr(task, 'is_completed') and task.is_completed:
+                    sub_task['status'] = 'completed'
+                    completed += 1
+                    # Store download path if available
+                    if hasattr(task, 'path') and task.path:
+                        self.download_paths.append(task.path)
+                elif hasattr(task, 'is_failed') and task.is_failed:
+                    sub_task['status'] = 'failed'
+                    failed += 1
+                elif sub_task['status'] == 'downloading':
+                    downloading += 1
+
             status_text = (
                 f"🔄 **Merge Task Progress**\n"
                 f"✅ Completed: {completed}/{len(self.sub_tasks)}\n"
                 f"⬇️ Downloading: {downloading}\n"
                 f"❌ Failed: {failed}\n"
-                f"⚙️ Overall Status: {'Merging...' if completed == len(self.sub_tasks) else 'Downloading...'}"
             )
-            
+
             await edit_message(self.status_message, status_text)
-            
+
             # Check if all tasks are complete
             if completed == len(self.sub_tasks):
                 await self.perform_merge()
@@ -110,62 +129,73 @@ class MergedTask:
             elif failed > 0:
                 await self.handle_failure()
                 break
-    
+            
+            await asyncio.sleep(2)
+
     async def perform_merge(self):
         """Merge all downloaded files"""
         await edit_message(self.status_message, "🔄 **Merging files...** Please wait.")
-        
-        # Collect all download paths
-        download_paths = []
-        for sub_task in self.sub_tasks:
-            if sub_task['task'].download_path:
-                download_paths.append(sub_task['task'].download_path)
-        
-        if not download_paths:
+
+        if not self.download_paths:
+            # Try to get paths from completed tasks
+            for sub_task in self.sub_tasks:
+                task = sub_task['task']
+                if hasattr(task, 'path') and task.path:
+                    self.download_paths.append(task.path)
+                elif hasattr(task, 'download_path') and task.download_path:
+                    self.download_paths.append(task.download_path)
+
+        if not self.download_paths:
             await send_message(self.message, "❌ No files found to merge!")
             return
+
+        # Simple merge: collect all files into merge directory
+        merged_file_path = self.merge_path
         
-        # Try to use existing merge function from split.py if available
-        try:
-            from ..modules.split import merge_multiple_files
-            merged_file_path = await merge_multiple_files(download_paths, self.merge_id)
-        except ImportError:
-            # Fallback: Simple merge by copying files to merge directory
-            from aiofiles.os import listdir, rename
-            import shutil
-            
-            merged_file_path = f"{self.merge_path}/merged_output"
-            os.makedirs(merged_file_path, exist_ok=True)
-            
-            for path in download_paths:
+        for path in self.download_paths:
+            if ospath.exists(path):
                 if ospath.isdir(path):
-                    for item in await listdir(path):
+                    # If it's a directory, move all contents
+                    for item in os.listdir(path):
                         src = ospath.join(path, item)
                         dst = ospath.join(merged_file_path, item)
-                        shutil.move(src, dst)
+                        if ospath.exists(dst):
+                            dst = ospath.join(merged_file_path, f"merged_{item}")
+                        os.rename(src, dst)
                 else:
-                    shutil.move(path, merged_file_path)
-        
-        # Upload the merged files
+                    # If it's a file, move it
+                    filename = ospath.basename(path)
+                    dst = ospath.join(merged_file_path, filename)
+                    if ospath.exists(dst):
+                        dst = ospath.join(merged_file_path, f"merged_{filename}")
+                    os.rename(path, dst)
+
+        # Upload the merged files using existing bot methods
         await edit_message(self.status_message, "📤 **Uploading merged files...**")
-        
-        if self.is_leech:
-            from ..telegram_helper.telegram_upload import upload_to_telegram
-            await upload_to_telegram(merged_file_path, self.message, self.user_dict)
-        else:
-            from ..mirror_leech_utils.upload_utils.gdrive_upload import upload_to_gdrive
-            await upload_to_gdrive(merged_file_path, self.message, self.user_dict)
-        
+
+        try:
+            # Use the existing upload method from the first sub-task
+            if self.sub_tasks:
+                main_task = self.sub_tasks[0]['task']
+                if hasattr(main_task, 'upload'):
+                    await main_task.upload(merged_file_path)
+                else:
+                    # Fallback: send as is
+                    await send_message(self.message, f"Merged files saved at: {merged_file_path}")
+        except Exception as e:
+            LOGGER.error(f"Upload error: {e}")
+            await send_message(self.message, f"⚠️ Merge completed but upload failed: {e}")
+
         # Cleanup
         await self.cleanup()
-        
+
         await edit_message(
             self.status_message,
             f"✅ **Merge Completed Successfully!**\n"
-            f"📦 Total files merged: {len(download_paths)}\n"
+            f"📦 Total files merged: {len(self.download_paths)}\n"
             f"💾 Merged path: {merged_file_path}"
         )
-    
+
     async def handle_failure(self):
         """Handle failed downloads"""
         failed_tasks = [t for t in self.sub_tasks if t['status'] == 'failed']
@@ -175,7 +205,7 @@ class MergedTask:
         error_msg += f"\nPlease check individual downloads and try again."
         await send_message(self.message, error_msg)
         await self.cleanup()
-    
+
     async def cleanup(self):
         """Clean up temporary files"""
         try:
