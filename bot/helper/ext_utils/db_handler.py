@@ -115,8 +115,14 @@ class DbManager:
             return
         data = user_data.get(user_id, {})
         data = data.copy()
+        # These keys are stored separately as files
         for key in ("THUMBNAIL", "RCLONE_CONFIG", "TOKEN_PICKLE"):
             data.pop(key, None)
+        
+        # NEW: Ensure MERGE_TASKS has a default value if not present
+        if "MERGE_TASKS" not in data:
+            data["MERGE_TASKS"] = getattr(Config, 'MERGE_TASKS', False)
+        
         pipeline = [
             {
                 "$replaceRoot": {
@@ -161,6 +167,34 @@ class DbManager:
             await self.db.users.update_one(
                 {"_id": user_id}, {"$unset": {key: ""}}, upsert=True
             )
+
+    # NEW: Helper method to get user's merge preference
+    async def get_merge_preference(self, user_id):
+        """Get merge tasks preference for a user"""
+        if self._return:
+            return getattr(Config, 'MERGE_TASKS', False)
+        
+        user = await self.db.users.find_one({"_id": user_id})
+        if user and "MERGE_TASKS" in user:
+            return user["MERGE_TASKS"]
+        return getattr(Config, 'MERGE_TASKS', False)
+    
+    # NEW: Helper method to set user's merge preference
+    async def set_merge_preference(self, user_id, enabled):
+        """Set merge tasks preference for a user"""
+        if self._return:
+            return
+        
+        await self.db.users.update_one(
+            {"_id": user_id}, 
+            {"$set": {"MERGE_TASKS": enabled}}, 
+            upsert=True
+        )
+        
+        # Also update in-memory user_data
+        if user_id not in user_data:
+            user_data[user_id] = {}
+        user_data[user_id]["MERGE_TASKS"] = enabled
 
     async def rss_update_all(self):
         if self._return:
