@@ -1,3 +1,5 @@
+import os
+import shutil
 from aiofiles.os import path as aiopath, listdir, remove
 from asyncio import sleep, gather
 from html import escape
@@ -56,11 +58,35 @@ from ..telegram_helper.message_utils import (
 class TaskListener(TaskConfig):
     def __init__(self):
         super().__init__()
-        # NEW: Add merge tracking attributes
-        self.download_path = None  # Track download path for merge feature
-        self.is_completed = False   # Track if download completed
-        self.is_failed = False      # Track if download failed
-        self.parent_merge_task = None  # Track if this is part of a merge
+        # Merge tracking attributes
+        self.download_path = None
+        self.is_completed = False
+        self.is_failed = False
+        self.parent_merge_task = None
+        self._dir_created = False
+
+    async def _ensure_directory(self, path):
+        """Safely create directory if it doesn't exist"""
+        if not path:
+            return False
+        try:
+            os.makedirs(path, exist_ok=True)
+            LOGGER.info(f"Directory ready: {path}")
+            return True
+        except Exception as e:
+            LOGGER.error(f"Failed to create directory {path}: {e}")
+            return False
+
+    async def _safe_cleanup_dir(self, path):
+        """Safely clean up directory if it exists"""
+        if not path:
+            return
+        try:
+            if os.path.exists(path):
+                shutil.rmtree(path, ignore_errors=True)
+                LOGGER.info(f"Cleaned up directory: {path}")
+        except Exception as e:
+            LOGGER.error(f"Error cleaning {path}: {e}")
 
     async def clean(self):
         try:
@@ -90,8 +116,15 @@ class TaskListener(TaskConfig):
                 self.same_dir[self.folder_name]["total"] -= 1
 
     async def on_download_start(self):
-        # NEW: Set download path when starting
-        self.download_path = f"{self.dir}"
+        """Called when download starts - setup directory"""
+        # Ensure directory exists
+        if hasattr(self, 'dir') and self.dir:
+            await self._ensure_directory(self.dir)
+            self.download_path = self.dir
+            LOGGER.info(f"Download started. Directory: {self.dir}")
+        else:
+            LOGGER.warning("on_download_start: self.dir is not set!")
+            self.download_path = None
         
         if (
             self.is_super_chat
@@ -103,12 +136,22 @@ class TaskListener(TaskConfig):
             )
 
     async def on_download_complete(self):
-        # NEW: Mark as completed for merge tracking
+        """Called when download completes"""
+        # Mark as completed for merge tracking
         self.is_completed = True
+        
+        # Validate directory exists
+        if hasattr(self, 'dir') and self.dir:
+            if not os.path.exists(self.dir):
+                LOGGER.error(f"Download directory missing: {self.dir}")
+                await self.on_download_error(f"Directory not found: {self.dir}")
+                return
+            LOGGER.info(f"Download completed. Directory: {self.dir}")
         
         await sleep(2)
         if self.is_cancelled:
             return
+        
         multi_links = False
         if (
             self.folder_name
@@ -139,6 +182,7 @@ class TaskListener(TaskConfig):
                                 multi_links = True
                             break
                     await sleep(1)
+        
         async with task_dict_lock:
             if self.is_cancelled:
                 return
@@ -147,6 +191,7 @@ class TaskListener(TaskConfig):
             download = task_dict[self.mid]
             self.name = download.name()
             gid = download.gid()
+        
         LOGGER.info(f"Download completed: {self.name}")
 
         if not (self.is_torrent or self.is_qbit):
@@ -164,12 +209,17 @@ class TaskListener(TaskConfig):
         if self.folder_name:
             self.name = self.folder_name.strip("/").split("/", 1)[0]
 
-        if not await aiopath.exists(f"{self.dir}/{self.name}"):
+        # Safely check if file exists
+        target_path = f"{self.dir}/{self.name}"
+        if not await aiopath.exists(target_path):
             try:
                 files = await listdir(self.dir)
-                self.name = files[-1]
-                if self.name == "yt-dlp-thumb":
-                    self.name = files[0]
+                if files:
+                    self.name = files[-1]
+                    if self.name == "yt-dlp-thumb":
+                        self.name = files[0] if files else self.name
+                else:
+                    LOGGER.warning(f"No files found in {self.dir}")
             except Exception as e:
                 await self.on_upload_error(str(e))
                 return
@@ -224,10 +274,7 @@ class TaskListener(TaskConfig):
                 await remove_non_included_files(up_dir, self.included_extensions)
 
         if self.ffmpeg_cmds:
-            up_path = await self.proceed_ffmpeg(
-                up_path,
-                gid,
-            )
+            up_path = await self.proceed_ffmpeg(up_path, gid)
             if self.is_cancelled:
                 return
             self.is_file = await aiopath.isfile(up_path)
@@ -252,10 +299,7 @@ class TaskListener(TaskConfig):
             self.size = await get_path_size(up_dir)
 
         if self.convert_audio or self.convert_video:
-            up_path = await self.convert_media(
-                up_path,
-                gid,
-            )
+            up_path = await self.convert_media(up_path, gid)
             if self.is_cancelled:
                 return
             self.is_file = await aiopath.isfile(up_path)
@@ -273,10 +317,7 @@ class TaskListener(TaskConfig):
             self.clear()
 
         if self.compress:
-            up_path = await self.proceed_compress(
-                up_path,
-                gid,
-            )
+            up_path = await self.proceed_compress(up_path, gid)
             self.is_file = await aiopath.isfile(up_path)
             if self.is_cancelled:
                 return
@@ -367,8 +408,10 @@ class TaskListener(TaskConfig):
             and Config.DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
+        
         msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
         LOGGER.info(f"Task Done: {self.name}")
+        
         if self.is_leech or self.is_buzzheavier:
             msg += f"\n<b>Total Files: </b>{folders}"
             if mime_type != 0:
@@ -427,6 +470,7 @@ class TaskListener(TaskConfig):
                 button = None
             msg += f"\n\n<b>cc: </b>{self.tag}"
             await send_message(self.message, msg, button)
+        
         if self.seed:
             await clean_target(self.up_dir)
             async with queue_dict_lock:
@@ -434,11 +478,13 @@ class TaskListener(TaskConfig):
                     non_queued_up.remove(self.mid)
             await start_from_queued()
             return
+        
         await clean_download(self.dir)
         async with task_dict_lock:
             if self.mid in task_dict:
                 del task_dict[self.mid]
             count = len(task_dict)
+        
         if count == 0:
             await self.clean()
         else:
@@ -451,25 +497,31 @@ class TaskListener(TaskConfig):
         await start_from_queued()
 
     async def on_download_error(self, error, button=None):
-        # NEW: Mark as failed for merge tracking
+        """Called when download fails"""
+        # Mark as failed for merge tracking
         self.is_failed = True
+        
+        LOGGER.error(f"Download error for task {self.mid}: {error}")
         
         async with task_dict_lock:
             if self.mid in task_dict:
                 del task_dict[self.mid]
             count = len(task_dict)
+        
         await self.remove_from_same_dir()
+        
+        # Clean up alldebrid if used
         if magnet_id := getattr(self, "_alldebrid_magnet_id", 0) or 0:
             try:
                 from ..mirror_leech_utils.download_utils.alldebrid_resolver import (
                     delete_magnet,
                 )
-
                 await delete_magnet(magnet_id)
             except:
                 pass
             self._alldebrid_magnet_id = 0
 
+        # Clean up torbox if used
         torbox_torrent_id = getattr(self, "_torbox_torrent_id", 0) or 0
         torbox_web_id = getattr(self, "_torbox_web_id", 0) or 0
 
@@ -479,20 +531,19 @@ class TaskListener(TaskConfig):
                     delete_torrent,
                     delete_web_download,
                 )
-
                 if torbox_torrent_id:
                     await delete_torrent(torbox_torrent_id)
-
                 if torbox_web_id:
                     await delete_web_download(torbox_web_id)
-
             except:
                 pass
 
         self._torbox_torrent_id = 0
         self._torbox_web_id = 0
+        
         msg = f"{self.tag} Download: {escape(str(error))}"
         await send_message(self.message, msg, button)
+        
         if count == 0:
             await self.clean()
         else:
@@ -519,18 +570,25 @@ class TaskListener(TaskConfig):
 
         await start_from_queued()
         await sleep(3)
-        await clean_download(self.dir)
+        
+        # Safely clean up directories
+        await self._safe_cleanup_dir(self.dir)
         if self.up_dir:
-            await clean_download(self.up_dir)
+            await self._safe_cleanup_dir(self.up_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
 
     async def on_upload_error(self, error):
+        """Called when upload fails"""
+        LOGGER.error(f"Upload error for task {self.mid}: {error}")
+        
         async with task_dict_lock:
             if self.mid in task_dict:
                 del task_dict[self.mid]
             count = len(task_dict)
+        
         await send_message(self.message, f"{self.tag} {escape(str(error))}")
+        
         if count == 0:
             await self.clean()
         else:
@@ -557,8 +615,10 @@ class TaskListener(TaskConfig):
 
         await start_from_queued()
         await sleep(3)
-        await clean_download(self.dir)
+        
+        # Safely clean up directories
+        await self._safe_cleanup_dir(self.dir)
         if self.up_dir:
-            await clean_download(self.up_dir)
+            await self._safe_cleanup_dir(self.up_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
