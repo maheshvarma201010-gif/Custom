@@ -25,11 +25,10 @@ class MergedTask:
         self.merge_id = f"merge_{message.id}_{message.from_user.id if message.from_user else message.sender_chat.id}"
         self.status_message = None
         self.merge_path = None
-        self.download_paths = []  # Track download paths
+        self.download_paths = []
 
     async def start_merge(self):
         """Start the merged task process"""
-        # Create status message
         self.status_message = await send_message(
             self.message,
             f"🔄 **Merge Task Started**\n"
@@ -37,21 +36,16 @@ class MergedTask:
             f"⚙️ Status: Initializing downloads..."
         )
 
-        # Create directory for merged downloads
         self.merge_path = f"{DOWNLOAD_DIR}{self.merge_id}/"
         os.makedirs(self.merge_path, exist_ok=True)
 
-        # Import Mirror here to avoid circular import
         from ...modules.mirror_leech import Mirror
 
-        # Create sub-tasks for each link
         for idx, link in enumerate(self.links, 1):
-            # Create modified args for sub-task
             sub_args = self.args.copy()
             sub_args["link"] = link
-            sub_args["-i"] = 0  # Reset multi counter
+            sub_args["-i"] = 0
 
-            # Create sub-task message
             sub_message = await send_message(
                 self.message,
                 f"🔗 Downloading {idx}/{len(self.links)}: {link[:50]}..."
@@ -61,7 +55,6 @@ class MergedTask:
             else:
                 sub_message.sender_chat = self.message.sender_chat
 
-            # Create sub-task
             sub_task = Mirror(
                 client=self.client,
                 message=sub_message,
@@ -72,7 +65,6 @@ class MergedTask:
                 parent_merge_task=self.merge_id
             )
             
-            # Store the link and task
             self.sub_tasks.append({
                 'task': sub_task,
                 'link': link,
@@ -80,12 +72,10 @@ class MergedTask:
                 'index': idx
             })
 
-        # Start all sub-tasks
         for sub_task in self.sub_tasks:
             await sub_task['task'].new_event()
             sub_task['status'] = 'downloading'
 
-        # Monitor completion
         await self.monitor_merge()
 
     async def monitor_merge(self):
@@ -93,19 +83,18 @@ class MergedTask:
         while True:
             await asyncio.sleep(3)
 
-            # Check status of each sub-task
             completed = 0
             failed = 0
             downloading = 0
             
             for sub_task in self.sub_tasks:
                 task = sub_task['task']
-                # Check if task has completed (you may need to adjust this based on your TaskListener)
                 if hasattr(task, 'is_completed') and task.is_completed:
                     sub_task['status'] = 'completed'
                     completed += 1
-                    # Store download path if available
-                    if hasattr(task, 'path') and task.path:
+                    if hasattr(task, 'download_path') and task.download_path:
+                        self.download_paths.append(task.download_path)
+                    elif hasattr(task, 'path') and task.path:
                         self.download_paths.append(task.path)
                 elif hasattr(task, 'is_failed') and task.is_failed:
                     sub_task['status'] = 'failed'
@@ -122,7 +111,6 @@ class MergedTask:
 
             await edit_message(self.status_message, status_text)
 
-            # Check if all tasks are complete
             if completed == len(self.sub_tasks):
                 await self.perform_merge()
                 break
@@ -137,25 +125,22 @@ class MergedTask:
         await edit_message(self.status_message, "🔄 **Merging files...** Please wait.")
 
         if not self.download_paths:
-            # Try to get paths from completed tasks
             for sub_task in self.sub_tasks:
                 task = sub_task['task']
-                if hasattr(task, 'path') and task.path:
-                    self.download_paths.append(task.path)
-                elif hasattr(task, 'download_path') and task.download_path:
+                if hasattr(task, 'download_path') and task.download_path:
                     self.download_paths.append(task.download_path)
+                elif hasattr(task, 'path') and task.path:
+                    self.download_paths.append(task.path)
 
         if not self.download_paths:
             await send_message(self.message, "❌ No files found to merge!")
             return
 
-        # Simple merge: collect all files into merge directory
         merged_file_path = self.merge_path
         
         for path in self.download_paths:
             if ospath.exists(path):
                 if ospath.isdir(path):
-                    # If it's a directory, move all contents
                     for item in os.listdir(path):
                         src = ospath.join(path, item)
                         dst = ospath.join(merged_file_path, item)
@@ -163,30 +148,25 @@ class MergedTask:
                             dst = ospath.join(merged_file_path, f"merged_{item}")
                         os.rename(src, dst)
                 else:
-                    # If it's a file, move it
                     filename = ospath.basename(path)
                     dst = ospath.join(merged_file_path, filename)
                     if ospath.exists(dst):
                         dst = ospath.join(merged_file_path, f"merged_{filename}")
                     os.rename(path, dst)
 
-        # Upload the merged files using existing bot methods
         await edit_message(self.status_message, "📤 **Uploading merged files...**")
 
         try:
-            # Use the existing upload method from the first sub-task
             if self.sub_tasks:
                 main_task = self.sub_tasks[0]['task']
                 if hasattr(main_task, 'upload'):
                     await main_task.upload(merged_file_path)
                 else:
-                    # Fallback: send as is
                     await send_message(self.message, f"Merged files saved at: {merged_file_path}")
         except Exception as e:
             LOGGER.error(f"Upload error: {e}")
             await send_message(self.message, f"⚠️ Merge completed but upload failed: {e}")
 
-        # Cleanup
         await self.cleanup()
 
         await edit_message(
