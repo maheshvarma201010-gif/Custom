@@ -1,6 +1,5 @@
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath
-from aiofiles import open as aiopen
 from os import path as ospath
 from base64 import b64encode
 from os.path import basename as ospath_basename
@@ -53,7 +52,7 @@ from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
 from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
-from ..helper.mirror_leech_utils.merge_utils import MergedTask  # New import
+from ..helper.mirror_leech_utils.merge_utils import MergedTask
 
 
 class Mirror(TaskListener):
@@ -69,7 +68,7 @@ class Mirror(TaskListener):
         bulk=None,
         multi_tag=None,
         options="",
-        parent_merge_task=None,  # New parameter for merge
+        parent_merge_task=None,
     ):
         if same_dir is None:
             same_dir = {}
@@ -81,12 +80,13 @@ class Mirror(TaskListener):
         self.options = options
         self.same_dir = same_dir
         self.bulk = bulk
-        self.parent_merge_task = parent_merge_task  # Track if this is part of a merge
+        self.parent_merge_task = parent_merge_task
         super().__init__()
         self.is_qbit = is_qbit
         self.is_leech = is_leech
         self.is_jd = is_jd
         self.is_nzb = is_nzb
+        self.download_path = None  # ADDED: Track download path for merge
 
     async def new_event(self):
         text = self.message.text.split("\n")
@@ -154,14 +154,14 @@ class Mirror(TaskListener):
         self.thumbnail_layout = args["-tl"]
         self.as_doc = args["-doc"]
         self.as_med = args["-med"]
-        self.folder_name = f"/{args["-m"]}".rstrip("/") if len(args["-m"]) > 0 else ""
+        self.folder_name = f"/{args['-m']}".rstrip("/") if len(args["-m"]) > 0 else ""
         self.bot_trans = args["-bt"]
         self.user_trans = args["-ut"]
         self.is_alldebrid = args["-ad"]
         self.is_torbox = args["-tb"]
         self.ffmpeg_cmds = args["-ff"]
 
-        # NEW: Check if merge is enabled for this user
+        # Check if merge is enabled for this user
         user_id = self.message.from_user.id if self.message.from_user else self.message.sender_chat.id
         user_dict = user_data.get(user_id, {})
         merge_enabled = user_dict.get("MERGE_TASKS", False)
@@ -179,18 +179,15 @@ class Mirror(TaskListener):
         
         # If no links found in args, check if link field has multiple links
         if not all_links and self.link:
-            # Check if link contains multiple URLs separated by space or newline
             if " " in self.link or "\n" in self.link:
                 all_links = self.link.split()
             else:
                 all_links = [self.link]
         
-        # NEW: Handle merge functionality
+        # Handle merge functionality
         if merge_enabled and len(all_links) > 1 and not self.parent_merge_task:
-            # Create a merged task instead of individual ones
             LOGGER.info(f"Creating merged task for {len(all_links)} links for user {user_id}")
             
-            # Create merged task
             merged_task = MergedTask(
                 client=self.client,
                 message=self.message,
@@ -203,7 +200,7 @@ class Mirror(TaskListener):
                 user_dict=user_dict,
                 args=args
             )
-            
+            merged_task.tag = self.tag  # ADDED: Preserve user tag
             await merged_task.start_merge()
             return
 
@@ -279,6 +276,7 @@ class Mirror(TaskListener):
         await self.get_tag(text)
 
         path = f"{DOWNLOAD_DIR}{self.mid}{self.folder_name}"
+        self.download_path = path  # ADDED: Set download path for merge tracking
 
         if not self.link and (reply_to := self.message.reply_to_message):
             if reply_to.text:
@@ -594,4 +592,4 @@ async def jd_leech(client, message):
 async def nzb_leech(client, message):
     bot_loop.create_task(
         Mirror(client, message, is_leech=True, is_nzb=True).new_event()
-)
+                )
