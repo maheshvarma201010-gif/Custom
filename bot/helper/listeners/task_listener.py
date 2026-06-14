@@ -1,3 +1,5 @@
+# bot/helper/listeners/task_listener.py
+
 import os
 import shutil
 from aiofiles.os import path as aiopath, listdir, remove
@@ -47,6 +49,7 @@ from ..mirror_leech_utils.status_utils.telegram_status import TelegramStatus
 from ..mirror_leech_utils.status_utils.buzzheavier_status import BuzzHeavierStatus
 from ..mirror_leech_utils.status_utils.gofile_status import GoFileStatus
 from ..mirror_leech_utils.telegram_uploader import TelegramUploader
+from ..mirror_leech_utils.merge_utils import VideoMerger
 from ..telegram_helper.button_build import ButtonMaker
 from ..telegram_helper.message_utils import (
     send_message,
@@ -58,12 +61,23 @@ from ..telegram_helper.message_utils import (
 class TaskListener(TaskConfig):
     def __init__(self):
         super().__init__()
-        # Merge tracking attributes
+        # Download tracking
         self.download_path = None
         self.is_completed = False
         self.is_failed = False
-        self.parent_merge_task = None
         self._dir_created = False
+        
+        # Auto Merge tracking
+        self.parent_merge_task = None
+        self.should_merge = False
+        self.force_merge = False
+        self.merge_custom_name = ""
+        self.merge_links = []
+        self.merged_files_to_delete = []
+        self.merge_performed = False
+        
+        # Cleanup tracking
+        self._temp_dirs = []
 
     async def _ensure_directory(self, path):
         """Safely create directory if it doesn't exist"""
@@ -71,6 +85,7 @@ class TaskListener(TaskConfig):
             return False
         try:
             os.makedirs(path, exist_ok=True)
+            self._temp_dirs.append(path)
             LOGGER.info(f"Directory ready: {path}")
             return True
         except Exception as e:
@@ -84,9 +99,26 @@ class TaskListener(TaskConfig):
         try:
             if os.path.exists(path):
                 shutil.rmtree(path, ignore_errors=True)
+                if path in self._temp_dirs:
+                    self._temp_dirs.remove(path)
                 LOGGER.info(f"Cleaned up directory: {path}")
         except Exception as e:
             LOGGER.error(f"Error cleaning {path}: {e}")
+
+    async def _cleanup_merged_files(self):
+        """Delete original files after successful merge"""
+        if not self.merge_performed:
+            return
+        
+        for file_path in self.merged_files_to_delete:
+            try:
+                if os.path.isfile(file_path):
+                    await remove(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path, ignore_errors=True)
+                LOGGER.info(f"Cleaned up merged original: {file_path}")
+            except Exception as e:
+                LOGGER.error(f"Failed to delete merged file {file_path}: {e}")
 
     async def clean(self):
         try:
@@ -135,6 +167,46 @@ class TaskListener(TaskConfig):
                 self.message.chat.id, self.message.link, self.tag
             )
 
+    async def _perform_auto_merge(self, directory: str) -> bool:
+        """Perform auto merge if enabled"""
+        # Check if merge should be performed
+        user_id = self.user_id
+        auto_merge_enabled = self.user_dict.get("AUTO_MERGE", False)
+        if not auto_merge_enabled:
+            auto_merge_enabled = getattr(Config, 'AUTO_MERGE', False)
+        
+        should_merge = self.force_merge or auto_merge_enabled
+        
+        if not should_merge:
+            return False
+        
+        # Check for video files
+        video_files = await VideoMerger.get_video_files(directory)
+        if len(video_files) < 2:
+            return False
+        
+        LOGGER.info(f"Auto merge triggered for {len(video_files)} videos in {directory}")
+        
+        # Perform merge
+        success, result, files_to_delete = await VideoMerger.perform_merge(
+            user_id=user_id,
+            directory=directory,
+            custom_name=self.merge_custom_name,
+            force_merge=self.force_merge,
+            listener=self
+        )
+        
+        if success and result:
+            self.merge_performed = True
+            self.merged_files_to_delete = files_to_delete
+            LOGGER.info(f"Merge successful: {result}")
+            return True
+        elif self.force_merge and not success:
+            await self.on_download_error(f"Merge failed: {result}")
+            return False
+        
+        return False
+
     async def on_download_complete(self):
         """Called when download completes"""
         # Mark as completed for merge tracking
@@ -151,6 +223,19 @@ class TaskListener(TaskConfig):
         await sleep(2)
         if self.is_cancelled:
             return
+        
+        # Check for auto merge before proceeding with upload
+        if self.dir and not self.parent_merge_task:
+            merge_done = await self._perform_auto_merge(self.dir)
+            if merge_done and self.merged_files_to_delete:
+                # Update path to merged file
+                for root, dirs, files in os.walk(self.dir):
+                    for file in files:
+                        if file.endswith('.mkv') and '_part' not in file:
+                            self.name = file
+                            break
+                # Clean up original files
+                await self._cleanup_merged_files()
         
         multi_links = False
         if (
@@ -409,7 +494,12 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
         
-        msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
+        # Add merge info to completion message if merge was performed
+        merge_info = ""
+        if self.merge_performed:
+            merge_info = f"\n\n🎬 **Auto Merge:** Merged {len(self.merged_files_to_delete)} videos into one file"
+        
+        msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}{merge_info}"
         LOGGER.info(f"Task Done: {self.name}")
         
         if self.is_leech or self.is_buzzheavier:
