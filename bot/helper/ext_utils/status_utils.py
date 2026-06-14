@@ -1,4 +1,4 @@
-# bot/helper/ext_utils/bot_utils.py
+# bot/helper/ext_utils/status_utils.py
 
 from html import escape
 from psutil import virtual_memory, cpu_percent, disk_usage
@@ -96,7 +96,7 @@ async def get_all_tasks(req_status: str, user_id):
 
 
 def get_readable_file_size(size_in_bytes):
-    if not size_in_bytes or size_in_bytes == 0:
+    if not size_in_bytes:
         return "0B"
 
     index = 0
@@ -108,8 +108,6 @@ def get_readable_file_size(size_in_bytes):
 
 
 def get_readable_time(seconds: int):
-    if seconds <= 0:
-        return "0s"
     periods = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
     result = ""
     for period_name, period_seconds in periods:
@@ -155,7 +153,7 @@ def speed_string_to_bytes(size_text: str):
 
 
 def get_size_bytes(size_text: str):
-    """Convert size string to bytes (e.g., '1GB' -> 1073741824)"""
+    """Convert size string to bytes"""
     if not size_text:
         return 0
     size_text = size_text.strip().upper()
@@ -198,14 +196,13 @@ def extract_links_and_merge_flag(text: str) -> tuple:
     """
     import re
     
-    # Split by spaces but respect quotes for merge name
     parts = text.split()
     
     links = []
     should_merge = False
     custom_name = ""
-    skip_next = False
     cleaned_parts = []
+    skip_next = False
     
     for i, part in enumerate(parts):
         if skip_next:
@@ -215,7 +212,6 @@ def extract_links_and_merge_flag(text: str) -> tuple:
             
         if part == '-m':
             should_merge = True
-            # Check if next part is a quoted name
             if i + 1 < len(parts):
                 next_part = parts[i + 1]
                 if next_part.startswith('"') and next_part.endswith('"'):
@@ -229,7 +225,6 @@ def extract_links_and_merge_flag(text: str) -> tuple:
                     skip_next = True
         else:
             cleaned_parts.append(part)
-            # Check if it's a URL
             if part.startswith(('http://', 'https://', 'magnet:', 'torrent:', 'rc:', 'gd:')):
                 links.append(part)
     
@@ -282,11 +277,14 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         
         # Show merge specific info
         if tstatus == MirrorStatus.STATUS_MERGE:
-            msg += f"\n<b>Status:</b> Merging videos in order..."
-            if hasattr(task, 'merge_progress'):
-                msg += f"\n<b>Progress:</b> {task.merge_progress}"
-            if hasattr(task, 'videos_merged'):
-                msg += f"\n<b>Videos Merged:</b> {task.videos_merged}"
+            msg += f"\n{get_progress_bar_string(task.progress())} {task.progress()}"
+            msg += f"\n<b>Processed:</b> {task.processed_bytes()}"
+            msg += f"\n<b>Size:</b> {task.size()}"
+            msg += f"\n<b>ETA:</b> {task.eta()}"
+            if hasattr(task, 'get_current_video'):
+                current = task.get_current_video()
+                if current:
+                    msg += f"\n<b>Current:</b> {current}"
         
         elif tstatus not in [MirrorStatus.STATUS_SEED, MirrorStatus.STATUS_QUEUEUP] and task.listener.progress:
             progress = task.progress()
