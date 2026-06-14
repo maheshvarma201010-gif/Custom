@@ -56,6 +56,11 @@ from ..telegram_helper.message_utils import (
 class TaskListener(TaskConfig):
     def __init__(self):
         super().__init__()
+        # NEW: Add merge tracking attributes
+        self.download_path = None  # Track download path for merge feature
+        self.is_completed = False   # Track if download completed
+        self.is_failed = False      # Track if download failed
+        self.parent_merge_task = None  # Track if this is part of a merge
 
     async def clean(self):
         try:
@@ -85,6 +90,9 @@ class TaskListener(TaskConfig):
                 self.same_dir[self.folder_name]["total"] -= 1
 
     async def on_download_start(self):
+        # NEW: Set download path when starting
+        self.download_path = f"{self.dir}"
+        
         if (
             self.is_super_chat
             and Config.INCOMPLETE_TASK_NOTIFIER
@@ -95,6 +103,9 @@ class TaskListener(TaskConfig):
             )
 
     async def on_download_complete(self):
+        # NEW: Mark as completed for merge tracking
+        self.is_completed = True
+        
         await sleep(2)
         if self.is_cancelled:
             return
@@ -440,6 +451,9 @@ class TaskListener(TaskConfig):
         await start_from_queued()
 
     async def on_download_error(self, error, button=None):
+        # NEW: Mark as failed for merge tracking
+        self.is_failed = True
+        
         async with task_dict_lock:
             if self.mid in task_dict:
                 del task_dict[self.mid]
