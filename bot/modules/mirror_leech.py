@@ -11,6 +11,7 @@ from ..helper.ext_utils.bot_utils import (
     sync_to_async,
     arg_parser,
     COMMAND_USAGE,
+    extract_links_and_merge_flag,
 )
 from ..helper.ext_utils.exceptions import DirectDownloadLinkException
 from ..helper.ext_utils.links_utils import (
@@ -81,12 +82,15 @@ class Mirror(TaskListener):
         self.same_dir = same_dir
         self.bulk = bulk
         self.parent_merge_task = parent_merge_task
+        self.should_merge = False
+        self.merge_custom_name = ""
+        self.merge_links = []
         super().__init__()
         self.is_qbit = is_qbit
         self.is_leech = is_leech
         self.is_jd = is_jd
         self.is_nzb = is_nzb
-        self.download_path = None  # ADDED: Track download path for merge
+        self.download_path = None
 
     async def new_event(self):
         text = self.message.text.split("\n")
@@ -154,18 +158,13 @@ class Mirror(TaskListener):
         self.thumbnail_layout = args["-tl"]
         self.as_doc = args["-doc"]
         self.as_med = args["-med"]
-        self.folder_name = f"/{args['-m']}".rstrip("/") if len(args["-m"]) > 0 else ""
+        self.merge_custom_name = args["-m"]
         self.bot_trans = args["-bt"]
         self.user_trans = args["-ut"]
         self.is_alldebrid = args["-ad"]
         self.is_torbox = args["-tb"]
         self.ffmpeg_cmds = args["-ff"]
 
-        # Check if merge is enabled for this user
-        user_id = self.message.from_user.id if self.message.from_user else self.message.sender_chat.id
-        user_dict = user_data.get(user_id, {})
-        merge_enabled = user_dict.get("MERGE_TASKS", False)
-        
         # Extract all links from the command
         all_links = []
         remaining_args = input_list[1:]
@@ -184,9 +183,29 @@ class Mirror(TaskListener):
             else:
                 all_links = [self.link]
         
-        # Handle merge functionality
-        if merge_enabled and len(all_links) > 1 and not self.parent_merge_task:
-            LOGGER.info(f"Creating merged task for {len(all_links)} links for user {user_id}")
+        # Check for manual merge flag in the original command text
+        full_command = " ".join(input_list)
+        self.should_merge, extracted_custom_name, cleaned_command = extract_links_and_merge_flag(full_command)
+        
+        # Override custom name if provided in merge flag
+        if extracted_custom_name:
+            self.merge_custom_name = extracted_custom_name
+        
+        # Store merge links for the merged task
+        self.merge_links = all_links if self.should_merge else []
+        
+        # Check if merge is enabled in user settings
+        user_id = self.message.from_user.id if self.message.from_user else self.message.sender_chat.id
+        user_dict = user_data.get(user_id, {})
+        merge_enabled = user_dict.get("AUTO_MERGE", False)
+        if not merge_enabled:
+            merge_enabled = getattr(Config, 'AUTO_MERGE', False)
+        
+        # Handle merge functionality - Priority: Manual flag (-m) > User setting (Auto Merge)
+        should_create_merge_task = (self.should_merge or merge_enabled) and len(all_links) > 1 and not self.parent_merge_task
+        
+        if should_create_merge_task:
+            LOGGER.info(f"Creating merged task for {len(all_links)} links for user {user_id} | Manual: {self.should_merge} | Custom name: {self.merge_custom_name}")
             
             merged_task = MergedTask(
                 client=self.client,
@@ -198,9 +217,11 @@ class Mirror(TaskListener):
                 is_nzb=self.is_nzb,
                 options=self.options,
                 user_dict=user_dict,
-                args=args
+                args=args,
+                custom_merge_name=self.merge_custom_name,
+                force_merge=self.should_merge
             )
-            merged_task.tag = self.tag  # ADDED: Preserve user tag
+            merged_task.tag = self.tag
             await merged_task.start_merge()
             return
 
@@ -276,7 +297,7 @@ class Mirror(TaskListener):
         await self.get_tag(text)
 
         path = f"{DOWNLOAD_DIR}{self.mid}{self.folder_name}"
-        self.download_path = path  # ADDED: Set download path for merge tracking
+        self.download_path = path
 
         if not self.link and (reply_to := self.message.reply_to_message):
             if reply_to.text:
@@ -592,4 +613,4 @@ async def jd_leech(client, message):
 async def nzb_leech(client, message):
     bot_loop.create_task(
         Mirror(client, message, is_leech=True, is_nzb=True).new_event()
-                )
+            )
